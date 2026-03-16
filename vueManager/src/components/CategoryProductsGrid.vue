@@ -72,8 +72,10 @@ const editingCell = ref(null)
 const inlineEditValue = ref('')
 /** True while inline edit save request is in progress */
 const inlineEditSaving = ref(false)
-/** Ref to the current inline-edit input (one of Checkbox/InputText/InputNumber) for focus */
+/** Ref to the current inline-edit input (one of Checkbox/InputText/InputNumber/Select) for focus */
 const inlineEditInputRef = ref(null)
+/** Options for combo editor (loaded from API when cell is opened) */
+const comboOptionsRef = ref([])
 
 // Default thumbnail from system settings
 
@@ -367,23 +369,26 @@ function isEditingCell(product, column) {
 /**
  * Start inline edit on double-click.
  * Blocks if another cell is currently saving to avoid race condition.
+ * For combo editor, loads options from API before focusing.
  */
-function startInlineEdit(product, column) {
+async function startInlineEdit(product, column) {
   if (!column.editable) return
   if (inlineEditSaving.value) return
   editingCell.value = { productId: product.id, columnName: column.name }
   const raw = product[column.name]
   inlineEditValue.value = raw === null || raw === undefined ? '' : raw
-  // autofocus doesn't work on dynamically inserted elements; focus via ref after DOM update
+  if ((column.editor_type || 'text') === 'combo') {
+    await loadComboOptions(column)
+  }
   nextTick(() => {
     const comp = inlineEditInputRef.value
     if (!comp) return
-    const el = comp.$el?.querySelector?.('input') ?? comp.$el ?? comp
+    const el = comp.$el?.querySelector?.('input') ?? comp.$el?.querySelector?.('.p-dropdown') ?? comp.$el ?? comp
     if (el?.focus) el.focus()
   })
 }
 
-/** Boolean columns (e.g. published) use type, not editor_type (select not in UI yet) */
+/** Boolean columns (e.g. published) use type, not editor_type */
 function isBooleanColumn(column) {
   return column.type === 'boolean'
 }
@@ -395,6 +400,9 @@ function normalizeValueForSave(rawValue, column) {
     if (rawValue === '' || rawValue === null) return null
     const num = Number(rawValue)
     return Number.isNaN(num) ? null : num
+  }
+  if (editorType === 'select' || editorType === 'combo') {
+    return rawValue
   }
   return rawValue
 }
@@ -409,6 +417,11 @@ function isInlineValueUnchanged(original, value, column) {
       v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v)
     return norm(original) === norm(value)
   }
+  if (editorType === 'select' || editorType === 'combo') {
+    const o = original === null || original === undefined ? null : original
+    const v = value === null || value === undefined ? null : value
+    return o === v || String(o) === String(v)
+  }
   const origStr = original === null || original === undefined ? '' : String(original)
   const valStr = value === null || value === undefined ? '' : String(value)
   return origStr === valStr
@@ -417,6 +430,44 @@ function isInlineValueUnchanged(original, value, column) {
 function clearInlineEditState() {
   editingCell.value = null
   inlineEditValue.value = ''
+  comboOptionsRef.value = []
+}
+
+/**
+ * Normalize combo API response to [{ id, label }]. Supports vendors: [{id, name}], options: [{id, label}], data: [{id, name}].
+ */
+function normalizeComboResponse(response) {
+  if (!response || typeof response !== 'object') return []
+  const list = response.vendors ?? response.options ?? response.data ?? []
+  if (!Array.isArray(list)) return []
+  return list.map((item) => ({
+    id: item.id ?? item.value,
+    label: item.name ?? item.label ?? String(item.id ?? item.value ?? ''),
+  }))
+}
+
+/**
+ * Load combo options from column's editor_combo_endpoint
+ */
+async function loadComboOptions(column) {
+  const endpoint = column.editor_combo_endpoint
+  if (!endpoint || typeof endpoint !== 'string') {
+    comboOptionsRef.value = []
+    return
+  }
+  try {
+    const response = await request.get(endpoint)
+    comboOptionsRef.value = normalizeComboResponse(response)
+  } catch (err) {
+    console.error('[CategoryProductsGrid] Combo options load failed:', err)
+    comboOptionsRef.value = []
+    toast.add({
+      severity: 'warn',
+      summary: _('error'),
+      detail: _('combo_options_load_failed') || err.message,
+      life: 3000,
+    })
+  }
 }
 
 /**
@@ -1074,6 +1125,41 @@ onMounted(async () => {
                           @keydown.enter.prevent="$event.target.blur()"
                           @keydown.escape="cancelInlineEdit"
                         />
+                        <div
+                          v-else-if="(column.editor_type || 'text') === 'select'"
+                          class="inline-edit-input-wrapper w-full"
+                          @keydown.enter.capture.prevent="$event.target?.blur?.()"
+                          @keydown.escape.capture.prevent="cancelInlineEdit"
+                        >
+                          <Select
+                            ref="inlineEditInputRef"
+                            v-model="inlineEditValue"
+                            :options="column.editor_options || []"
+                            option-label="label"
+                            option-value="value"
+                            class="w-full"
+                            :disabled="inlineEditSaving"
+                            @change="saveInlineEdit(product, column)"
+                          />
+                        </div>
+                        <div
+                          v-else-if="(column.editor_type || 'text') === 'combo'"
+                          class="inline-edit-input-wrapper w-full"
+                          @keydown.enter.capture.prevent="$event.target?.blur?.()"
+                          @keydown.escape.capture.prevent="cancelInlineEdit"
+                        >
+                          <Select
+                            ref="inlineEditInputRef"
+                            v-model="inlineEditValue"
+                            :options="comboOptionsRef"
+                            option-label="label"
+                            option-value="id"
+                            class="w-full"
+                            :show-clear="true"
+                            :disabled="inlineEditSaving"
+                            @change="saveInlineEdit(product, column)"
+                          />
+                        </div>
                         <div
                           v-else
                           class="inline-edit-input-wrapper w-full"

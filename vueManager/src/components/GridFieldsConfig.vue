@@ -62,6 +62,11 @@ const showEditDialog = ref(false)
 const editingField = ref(null)
 const editingFieldIndex = ref(null)
 
+/** Raw JSON string for editor_options in Add field dialog (textarea) */
+const newFieldEditorOptionsJson = ref('[]')
+/** Raw JSON string for editor_options in Edit field dialog (textarea) */
+const editingFieldEditorOptionsJson = ref('[]')
+
 /**
  * Available grids
  */
@@ -101,11 +106,39 @@ const displayConfigTypes = ['datetime', 'price', 'weight']
 const isCategoryProductsGrid = computed(() => selectedGrid.value === 'category-products')
 
 /**
- * Editor type options for editable columns (text, number; select later)
+ * Parse editor_options from array or JSON string. Returns array or null if invalid.
+ */
+function parseEditorOptions(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Serialize editor_options for textarea display
+ */
+function editorOptionsToJson(editorOptions) {
+  const arr = Array.isArray(editorOptions) ? editorOptions : []
+  try {
+    return JSON.stringify(arr, null, 2)
+  } catch {
+    return '[]'
+  }
+}
+
+/**
+ * Editor type options for editable columns (text, number, select, combo)
  */
 const editorTypeOptions = computed(() => [
   { label: _('editor_type_text'), value: 'text' },
   { label: _('editor_type_number'), value: 'number' },
+  { label: _('editor_type_select'), value: 'select' },
+  { label: _('editor_type_combo'), value: 'combo' },
 ])
 
 /**
@@ -191,6 +224,8 @@ async function loadFields() {
         unit_position: col.unit_position || '',
         editable: col.editable === true,
         editor_type: col.editor_type || '',
+        editor_options: Array.isArray(col.editor_options) ? col.editor_options : [],
+        editor_combo_endpoint: col.editor_combo_endpoint || '',
       }))
     } else {
       console.error('[GridFieldsConfig] Invalid response:', response)
@@ -251,6 +286,8 @@ async function saveConfig() {
       if (selectedGrid.value === 'category-products') {
         data.editable = field.editable === true
         if (field.editor_type) data.editor_type = field.editor_type
+        if (Array.isArray(field.editor_options)) data.editor_options = field.editor_options
+        if (field.editor_combo_endpoint) data.editor_combo_endpoint = field.editor_combo_endpoint
       }
 
       return data
@@ -393,8 +430,11 @@ function openAddDialog() {
       },
       editable: false,
       editor_type: 'text',
+      editor_options: [],
+      editor_combo_endpoint: '',
     },
   }
+  newFieldEditorOptionsJson.value = editorOptionsToJson(newField.value.config.editor_options)
   showAddDialog.value = true
 }
 
@@ -483,6 +523,31 @@ async function addField() {
     if (selectedGrid.value === 'category-products') {
       data.config.editable = newField.value.config.editable === true
       data.config.editor_type = newField.value.config.editor_type || 'text'
+      if (newField.value.config.editor_type === 'select') {
+        const opts = parseEditorOptions(newFieldEditorOptionsJson.value)
+        if (opts === null) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('invalid_json_config'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_options = opts
+      } else if (newField.value.config.editor_type === 'combo') {
+        const endpoint = (newField.value.config.editor_combo_endpoint || '').trim()
+        if (!endpoint) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('editor_combo_endpoint_required'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_combo_endpoint = endpoint
+      }
     }
 
     const result = await request.post(`/api/mgr/grid-config/${selectedGrid.value}/field`, data)
@@ -529,6 +594,8 @@ async function addField() {
         unit_position: config.unit_position || '',
         editable: config.editable === true,
         editor_type: config.editor_type || '',
+        editor_options: Array.isArray(config.editor_options) ? config.editor_options : [],
+        editor_combo_endpoint: config.editor_combo_endpoint || '',
       })
     }
 
@@ -631,9 +698,12 @@ function openEditDialog(field, index) {
       badge: badgeConfig,
       editable: field.editable === true,
       editor_type: field.editor_type || 'text',
+      editor_options: Array.isArray(field.editor_options) ? field.editor_options : [],
+      editor_combo_endpoint: field.editor_combo_endpoint || '',
     },
   }
 
+  editingFieldEditorOptionsJson.value = editorOptionsToJson(editingField.value.config.editor_options)
   showEditDialog.value = true
 }
 
@@ -721,6 +791,31 @@ async function saveEdit() {
     if (selectedGrid.value === 'category-products') {
       data.config.editable = editingField.value.config.editable === true
       data.config.editor_type = editingField.value.config.editor_type || 'text'
+      if (editingField.value.config.editor_type === 'select') {
+        const opts = parseEditorOptions(editingFieldEditorOptionsJson.value)
+        if (opts === null) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('invalid_json_config'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_options = opts
+      } else if (editingField.value.config.editor_type === 'combo') {
+        const endpoint = (editingField.value.config.editor_combo_endpoint || '').trim()
+        if (!endpoint) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('editor_combo_endpoint_required'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_combo_endpoint = endpoint
+      }
     }
 
     const result = await request.put(
@@ -770,6 +865,8 @@ async function saveEdit() {
         unit_position: config.unit_position || '',
         editable: config.editable === true,
         editor_type: config.editor_type || '',
+        editor_options: Array.isArray(config.editor_options) ? config.editor_options : [],
+        editor_combo_endpoint: config.editor_combo_endpoint || '',
       }
     }
 
@@ -1111,6 +1208,25 @@ onMounted(() => {
             option-value="value"
             class="w-full mt-1"
           />
+          <div v-if="newField.config.editor_type === 'select'" class="mt-2">
+            <label for="new-field-editor-options">{{ _('editor_options') }}</label>
+            <Textarea
+              id="new-field-editor-options"
+              v-model="newFieldEditorOptionsJson"
+              rows="4"
+              class="w-full font-mono mt-1"
+              :placeholder="_('editor_options_hint')"
+            />
+          </div>
+          <div v-if="newField.config.editor_type === 'combo'" class="mt-2">
+            <label for="new-field-editor-combo-endpoint">{{ _('editor_combo_endpoint') }}</label>
+            <InputText
+              id="new-field-editor-combo-endpoint"
+              v-model="newField.config.editor_combo_endpoint"
+              class="w-full mt-1"
+              :placeholder="_('editor_combo_endpoint_placeholder')"
+            />
+          </div>
         </div>
       </div>
 
@@ -1378,6 +1494,25 @@ onMounted(() => {
               option-value="value"
               class="w-full mt-1"
             />
+            <div v-if="editingField.config.editor_type === 'select'" class="mt-2">
+              <label for="edit-field-editor-options">{{ _('editor_options') }}</label>
+              <Textarea
+                id="edit-field-editor-options"
+                v-model="editingFieldEditorOptionsJson"
+                rows="4"
+                class="w-full font-mono mt-1"
+                :placeholder="_('editor_options_hint')"
+              />
+            </div>
+            <div v-if="editingField.config.editor_type === 'combo'" class="mt-2">
+              <label for="edit-field-editor-combo-endpoint">{{ _('editor_combo_endpoint') }}</label>
+              <InputText
+                id="edit-field-editor-combo-endpoint"
+                v-model="editingField.config.editor_combo_endpoint"
+                class="w-full mt-1"
+                :placeholder="_('editor_combo_endpoint_placeholder')"
+              />
+            </div>
           </div>
         </div>
 
