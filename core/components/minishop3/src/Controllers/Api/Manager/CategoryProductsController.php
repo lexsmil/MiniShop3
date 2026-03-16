@@ -4,6 +4,7 @@ namespace MiniShop3\Controllers\Api\Manager;
 
 use MiniShop3\Model\msProduct;
 use MiniShop3\Model\msProductData;
+use MiniShop3\Model\msProductOption;
 use MiniShop3\Model\msCategory;
 use MiniShop3\Router\Response;
 use MiniShop3\Services\FilterConfigManager;
@@ -57,11 +58,23 @@ class CategoryProductsController
             $sortDir = 'ASC';
         }
 
-        // Build query
+        $gridConfig = $this->modx->services->get('ms3_grid_config');
+        $gridFields = $gridConfig ? $gridConfig->getGridConfig('category-products', true) : [];
+        $optionFields = $gridConfig ? $gridConfig->extractOptionFields($gridFields) : [];
+
         $c = $this->modx->newQuery(msProduct::class);
         $c->innerJoin(msProductData::class, 'Data', 'msProduct.id = Data.id');
 
-        // class_key filter (getIterator doesn't call addDerivativeCriteria)
+        foreach ($optionFields as $opt) {
+            $alias = $opt['alias'];
+            $key = $opt['key'];
+            $c->leftJoin(
+                msProductOption::class,
+                $alias,
+                "`{$alias}`.product_id = msProduct.id AND `{$alias}`.key = '{$key}'"
+            );
+        }
+
         $c->where(['msProduct.class_key' => msProduct::class]);
 
         // Parent filter
@@ -122,20 +135,30 @@ class CategoryProductsController
             }
         }
 
+        foreach ($optionFields as $opt) {
+            $paramKey = 'filter_' . $opt['fieldName'];
+            if (isset($params[$paramKey]) && $params[$paramKey] !== '') {
+                $filterValue = $this->modx->escape($params[$paramKey]);
+                $c->where(["`{$opt['alias']}`.value:LIKE" => "%{$filterValue}%"]);
+            }
+        }
+
         // Default: hide deleted if not explicitly filtered
         if (!isset($params['deleted']) || $params['deleted'] === '') {
             $c->where(['msProduct.deleted' => 0]);
         }
 
-        // Get total count
-        $total = $this->modx->getCount(msProduct::class, $c);
+        $countQuery = clone $c;
+        $countQuery->select('COUNT(DISTINCT msProduct.id)');
+        $countQuery->prepare();
+        $countQuery->stmt->execute();
+        $total = (int)$countQuery->stmt->fetchColumn();
 
-        // Apply sorting and pagination
-        $c->sortby($sortBy, $sortDir);
+        $sortField = $this->mapSortField($sortBy, $optionFields);
+        $c->sortby($sortField, $sortDir);
         $c->limit($limit, $start);
 
-        // Select fields
-        $c->select([
+        $selectParts = [
             'msProduct.*',
             'Data.article',
             'Data.price',
@@ -148,13 +171,18 @@ class CategoryProductsController
             'Data.new',
             'Data.popular',
             'Data.favorite',
-        ]);
+        ];
+        foreach ($optionFields as $opt) {
+            $selectParts[] = "`{$opt['alias']}`.value AS `{$opt['fieldName']}`";
+        }
+        $c->select($selectParts);
 
-        $products = $this->modx->getIterator(msProduct::class, $c);
+        $c->prepare();
+        $rows = $c->stmt->execute() ? $c->stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
         $results = [];
-        foreach ($products as $product) {
-            $results[] = $this->formatProduct($product, $nested);
+        foreach ($rows as $row) {
+            $results[] = $this->formatProduct($row, $nested);
         }
 
         return Response::success([
@@ -394,45 +422,74 @@ class CategoryProductsController
     }
 
     /**
-     * Format product for API response
+     * Map sort field to SQL expression (supports option fields)
      *
-     * @param msProduct $product
+     * @param string $sortBy
+     * @param array $optionFields
+     * @return string
+     */
+    protected function mapSortField(string $sortBy, array $optionFields): string
+    {
+        foreach ($optionFields as $opt) {
+            if ($opt['fieldName'] === $sortBy) {
+                return "`{$opt['alias']}`.value";
+            }
+        }
+        $productFields = ['id', 'pagetitle', 'menuindex', 'published', 'createdon', 'editedon'];
+        if (in_array($sortBy, $productFields)) {
+            return "msProduct.{$sortBy}";
+        }
+        $dataFields = ['article', 'price', 'old_price', 'weight', 'vendor_id', 'made_in'];
+        if (in_array($sortBy, $dataFields)) {
+            return "Data.{$sortBy}";
+        }
+        return "msProduct.{$sortBy}";
+    }
+
+    /**
+     * Format product row for API response
+     *
+     * @param array $row Raw row from query (includes joined option values)
      * @param bool $nested
      * @return array
      */
-    protected function formatProduct(msProduct $product, bool $nested = false): array
+    protected function formatProduct(array $row, bool $nested = false): array
     {
+        $id = (int)$row['id'];
         $data = [
-            'id' => $product->get('id'),
-            'pagetitle' => $product->get('pagetitle'),
-            'longtitle' => $product->get('longtitle'),
-            'alias' => $product->get('alias'),
-            'parent' => $product->get('parent'),
-            'menuindex' => $product->get('menuindex'),
-            'published' => (bool)$product->get('published'),
-            'deleted' => (bool)$product->get('deleted'),
-            'hidemenu' => (bool)$product->get('hidemenu'),
-            'createdon' => $product->get('createdon'),
-            'editedon' => $product->get('editedon'),
-            // Product data
-            'article' => $product->get('article'),
-            'price' => (float)$product->get('price'),
-            'old_price' => (float)$product->get('old_price'),
-            'weight' => (float)$product->get('weight'),
-            'image' => $product->get('image'),
-            'thumb' => $product->get('thumb'),
-            'vendor_id' => (int)$product->get('vendor_id'),
-            'made_in' => $product->get('made_in'),
-            'new' => (bool)$product->get('new'),
-            'popular' => (bool)$product->get('popular'),
-            'favorite' => (bool)$product->get('favorite'),
-            // Preview URL
-            'preview_url' => $this->modx->makeUrl($product->get('id'), '', '', 'full'),
+            'id' => $id,
+            'pagetitle' => $row['pagetitle'] ?? '',
+            'longtitle' => $row['longtitle'] ?? '',
+            'alias' => $row['alias'] ?? '',
+            'parent' => (int)($row['parent'] ?? 0),
+            'menuindex' => (int)($row['menuindex'] ?? 0),
+            'published' => (bool)($row['published'] ?? false),
+            'deleted' => (bool)($row['deleted'] ?? false),
+            'hidemenu' => (bool)($row['hidemenu'] ?? false),
+            'createdon' => $row['createdon'] ?? null,
+            'editedon' => $row['editedon'] ?? null,
+            'article' => $row['article'] ?? '',
+            'price' => (float)($row['price'] ?? 0),
+            'old_price' => (float)($row['old_price'] ?? 0),
+            'weight' => (float)($row['weight'] ?? 0),
+            'image' => $row['image'] ?? '',
+            'thumb' => $row['thumb'] ?? '',
+            'vendor_id' => (int)($row['vendor_id'] ?? 0),
+            'made_in' => $row['made_in'] ?? '',
+            'new' => (bool)($row['new'] ?? false),
+            'popular' => (bool)($row['popular'] ?? false),
+            'favorite' => (bool)($row['favorite'] ?? false),
+            'preview_url' => $this->modx->makeUrl($id, '', '', 'full'),
         ];
 
-        // Add category name for nested products
-        if ($nested && $product->get('parent') != 0) {
-            $parent = $this->modx->getObject(msCategory::class, $product->get('parent'));
+        foreach ($row as $key => $value) {
+            if (!array_key_exists($key, $data)) {
+                $data[$key] = $value;
+            }
+        }
+
+        if ($nested && ($row['parent'] ?? 0) != 0) {
+            $parent = $this->modx->getObject(msCategory::class, (int)$row['parent']);
             if ($parent) {
                 $data['category_name'] = $parent->get('pagetitle');
             }

@@ -177,6 +177,8 @@ class GridConfigService
                     'relation',
                     // computed type
                     'computed',
+                    // option type
+                    'option',
                     // badge type
                     'source_field', 'color_field',
                     // datetime type
@@ -349,6 +351,13 @@ class GridConfigService
                         return $validation;
                     }
                     break;
+
+                case 'option':
+                    $validation = $this->validateOptionConfig($config);
+                    if (!$validation['success']) {
+                        return $validation;
+                    }
+                    break;
             }
 
             // Add type to config
@@ -462,6 +471,12 @@ class GridConfigService
                     break;
                 case 'actions':
                     $validation = $this->validateActionsConfig($config);
+                    if (!$validation['success']) {
+                        return $validation;
+                    }
+                    break;
+                case 'option':
+                    $validation = $this->validateOptionConfig($config);
                     if (!$validation['success']) {
                         return $validation;
                     }
@@ -720,6 +735,62 @@ class GridConfigService
         }
 
         return ['success' => true];
+    }
+
+    /**
+     * Validate Option field configuration
+     *
+     * @param array $config
+     * @return array
+     */
+    protected function validateOptionConfig(array $config): array
+    {
+        $option = $config['option'] ?? [];
+
+        if (empty($option['key'])) {
+            return ['success' => false, 'message' => 'option.key is required for option field'];
+        }
+
+        $key = $option['key'];
+        if (!preg_match('/^[a-z0-9_]+$/i', $key)) {
+            return ['success' => false, 'message' => 'option.key must contain only letters, numbers and underscores'];
+        }
+
+        return ['success' => true];
+    }
+
+    /**
+     * Extract option fields from grid config for JOIN building
+     *
+     * @param array $gridFields Array of grid field configs
+     * @return array List of option field definitions: [['fieldName' => 'option_length', 'key' => 'length', 'alias' => 'opt_length'], ...]
+     */
+    public function extractOptionFields(array $gridFields): array
+    {
+        $optionFields = [];
+
+        foreach ($gridFields as $field) {
+            if (($field['type'] ?? 'model') !== 'option') {
+                continue;
+            }
+
+            $option = $field['option'] ?? null;
+            if (!$option || empty($option['key'])) {
+                continue;
+            }
+
+            $key = $option['key'];
+            $fieldName = $field['name'];
+            $alias = 'opt_' . $key;
+
+            $optionFields[] = [
+                'fieldName' => $fieldName,
+                'key' => $key,
+                'alias' => $alias,
+            ];
+        }
+
+        return $optionFields;
     }
 
     /**
