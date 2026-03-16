@@ -62,93 +62,9 @@ class CategoryProductsController
         $gridFields = $gridConfig ? $gridConfig->getGridConfig('category-products', true) : [];
         $optionFields = $gridConfig ? $gridConfig->extractOptionFields($gridFields) : [];
 
-        $c = $this->modx->newQuery(msProduct::class);
-        $c->innerJoin(msProductData::class, 'Data', 'msProduct.id = Data.id');
+        $c = $this->buildProductListQuery($categoryId, $params, $nested, $optionFields);
 
-        foreach ($optionFields as $opt) {
-            $alias = $opt['alias'];
-            $key = $opt['key'];
-            $c->leftJoin(
-                msProductOption::class,
-                $alias,
-                "`{$alias}`.product_id = msProduct.id AND `{$alias}`.key = '{$key}'"
-            );
-        }
-
-        $c->where(['msProduct.class_key' => msProduct::class]);
-
-        // Parent filter
-        if ($nested) {
-            // Get all child category IDs
-            $categoryIds = $this->getChildCategories($categoryId);
-            $categoryIds[] = $categoryId;
-            $c->where(['msProduct.parent:IN' => $categoryIds]);
-        } else {
-            $c->where(['msProduct.parent' => $categoryId]);
-        }
-
-        // Search filter
-        if (!empty($query)) {
-            $c->where([
-                'msProduct.pagetitle:LIKE' => "%{$query}%",
-                'OR:Data.article:LIKE' => "%{$query}%",
-            ]);
-        }
-
-        // Boolean filters for msProduct fields
-        $productBooleanFields = ['published', 'deleted', 'hidemenu', 'isfolder'];
-        foreach ($productBooleanFields as $field) {
-            if (isset($params[$field]) && $params[$field] !== '') {
-                $c->where(["msProduct.{$field}" => (int)$params[$field]]);
-            }
-        }
-
-        // Boolean filters for msProductData fields
-        $dataBooleanFields = ['new', 'popular', 'favorite'];
-        foreach ($dataBooleanFields as $field) {
-            if (isset($params[$field]) && $params[$field] !== '') {
-                $c->where(["Data.{$field}" => (int)$params[$field]]);
-            }
-        }
-
-        // Text filters for msProduct fields (LIKE search)
-        $productTextFields = ['pagetitle', 'longtitle', 'alias', 'description', 'introtext', 'content'];
-        foreach ($productTextFields as $field) {
-            if (!empty($params[$field])) {
-                $c->where(["msProduct.{$field}:LIKE" => "%{$params[$field]}%"]);
-            }
-        }
-
-        // Text filters for msProductData fields (LIKE search)
-        $dataTextFields = ['article', 'made_in'];
-        foreach ($dataTextFields as $field) {
-            if (!empty($params[$field])) {
-                $c->where(["Data.{$field}:LIKE" => "%{$params[$field]}%"]);
-            }
-        }
-
-        // Numeric filters for msProductData fields (exact match)
-        $dataNumericFields = ['price', 'old_price', 'weight', 'vendor_id'];
-        foreach ($dataNumericFields as $field) {
-            if (isset($params[$field]) && $params[$field] !== '') {
-                $c->where(["Data.{$field}" => $params[$field]]);
-            }
-        }
-
-        foreach ($optionFields as $opt) {
-            $paramKey = 'filter_' . $opt['fieldName'];
-            if (isset($params[$paramKey]) && $params[$paramKey] !== '') {
-                $filterValue = $this->modx->escape($params[$paramKey]);
-                $c->where(["`{$opt['alias']}`.value:LIKE" => "%{$filterValue}%"]);
-            }
-        }
-
-        // Default: hide deleted if not explicitly filtered
-        if (!isset($params['deleted']) || $params['deleted'] === '') {
-            $c->where(['msProduct.deleted' => 0]);
-        }
-
-        $countQuery = clone $c;
+        $countQuery = $this->buildProductListQuery($categoryId, $params, $nested, $optionFields);
         $countQuery->select('COUNT(DISTINCT msProduct.id)');
         $countQuery->prepare();
         $countQuery->stmt->execute();
@@ -173,16 +89,20 @@ class CategoryProductsController
             'Data.favorite',
         ];
         foreach ($optionFields as $opt) {
-            $selectParts[] = "`{$opt['alias']}`.value AS `{$opt['fieldName']}`";
+            $selectParts[] = "GROUP_CONCAT(DISTINCT `{$opt['alias']}`.value) AS `{$opt['fieldName']}`";
         }
         $c->select($selectParts);
+        if (!empty($optionFields)) {
+            $c->groupby('msProduct.id');
+        }
 
         $c->prepare();
         $rows = $c->stmt->execute() ? $c->stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
 
+        $optionFieldNames = array_column($optionFields, 'fieldName');
         $results = [];
         foreach ($rows as $row) {
-            $results[] = $this->formatProduct($row, $nested);
+            $results[] = $this->formatProduct($row, $nested, $optionFieldNames);
         }
 
         return Response::success([
@@ -424,6 +344,8 @@ class CategoryProductsController
     /**
      * Map sort field to SQL expression (supports option fields)
      *
+     * For option fields uses GROUP_CONCAT to comply with MySQL ONLY_FULL_GROUP_BY.
+     *
      * @param string $sortBy
      * @param array $optionFields
      * @return string
@@ -432,7 +354,7 @@ class CategoryProductsController
     {
         foreach ($optionFields as $opt) {
             if ($opt['fieldName'] === $sortBy) {
-                return "`{$opt['alias']}`.value";
+                return "GROUP_CONCAT(DISTINCT `{$opt['alias']}`.value)";
             }
         }
         $productFields = ['id', 'pagetitle', 'menuindex', 'published', 'createdon', 'editedon'];
@@ -451,9 +373,10 @@ class CategoryProductsController
      *
      * @param array $row Raw row from query (includes joined option values)
      * @param bool $nested
+     * @param array $optionFieldNames Allowed option field names (prevents leaking internal xPDO/MySQL columns)
      * @return array
      */
-    protected function formatProduct(array $row, bool $nested = false): array
+    protected function formatProduct(array $row, bool $nested = false, array $optionFieldNames = []): array
     {
         $id = (int)$row['id'];
         $data = [
@@ -482,8 +405,9 @@ class CategoryProductsController
             'preview_url' => $this->modx->makeUrl($id, '', '', 'full'),
         ];
 
+        $allowedOptionFields = array_flip($optionFieldNames);
         foreach ($row as $key => $value) {
-            if (!array_key_exists($key, $data)) {
+            if (!array_key_exists($key, $data) && isset($allowedOptionFields[$key])) {
                 $data[$key] = $value;
             }
         }
@@ -496,6 +420,97 @@ class CategoryProductsController
         }
 
         return $data;
+    }
+
+    /**
+     * Build base product list query with JOINs and filters (no select/sort/limit)
+     *
+     * @param int $categoryId
+     * @param array $params
+     * @param bool $nested
+     * @param array $optionFields
+     * @return \xPDO\Om\xPDOQuery
+     */
+    protected function buildProductListQuery(int $categoryId, array $params, bool $nested, array $optionFields): \xPDO\Om\xPDOQuery
+    {
+        $query = trim($params['query'] ?? '');
+        $c = $this->modx->newQuery(msProduct::class);
+        $c->innerJoin(msProductData::class, 'Data', 'msProduct.id = Data.id');
+
+        foreach ($optionFields as $opt) {
+            $alias = $opt['alias'];
+            $key = $opt['key'];
+            $c->leftJoin(
+                msProductOption::class,
+                $alias,
+                "`{$alias}`.product_id = msProduct.id AND `{$alias}`.key = '{$key}'"
+            );
+        }
+
+        $c->where(['msProduct.class_key' => msProduct::class]);
+
+        if ($nested) {
+            $categoryIds = $this->getChildCategories($categoryId);
+            $categoryIds[] = $categoryId;
+            $c->where(['msProduct.parent:IN' => $categoryIds]);
+        } else {
+            $c->where(['msProduct.parent' => $categoryId]);
+        }
+
+        if (!empty($query)) {
+            $c->where([
+                'msProduct.pagetitle:LIKE' => "%{$query}%",
+                'OR:Data.article:LIKE' => "%{$query}%",
+            ]);
+        }
+
+        $productBooleanFields = ['published', 'deleted', 'hidemenu', 'isfolder'];
+        foreach ($productBooleanFields as $field) {
+            if (isset($params[$field]) && $params[$field] !== '') {
+                $c->where(["msProduct.{$field}" => (int)$params[$field]]);
+            }
+        }
+
+        $dataBooleanFields = ['new', 'popular', 'favorite'];
+        foreach ($dataBooleanFields as $field) {
+            if (isset($params[$field]) && $params[$field] !== '') {
+                $c->where(["Data.{$field}" => (int)$params[$field]]);
+            }
+        }
+
+        $productTextFields = ['pagetitle', 'longtitle', 'alias', 'description', 'introtext', 'content'];
+        foreach ($productTextFields as $field) {
+            if (!empty($params[$field])) {
+                $c->where(["msProduct.{$field}:LIKE" => "%{$params[$field]}%"]);
+            }
+        }
+
+        $dataTextFields = ['article', 'made_in'];
+        foreach ($dataTextFields as $field) {
+            if (!empty($params[$field])) {
+                $c->where(["Data.{$field}:LIKE" => "%{$params[$field]}%"]);
+            }
+        }
+
+        $dataNumericFields = ['price', 'old_price', 'weight', 'vendor_id'];
+        foreach ($dataNumericFields as $field) {
+            if (isset($params[$field]) && $params[$field] !== '') {
+                $c->where(["Data.{$field}" => $params[$field]]);
+            }
+        }
+
+        foreach ($optionFields as $opt) {
+            $paramKey = 'filter_' . $opt['fieldName'];
+            if (isset($params[$paramKey]) && $params[$paramKey] !== '') {
+                $c->where(["`{$opt['alias']}`.value:LIKE" => "%{$params[$paramKey]}%"]);
+            }
+        }
+
+        if (!isset($params['deleted']) || $params['deleted'] === '') {
+            $c->where(['msProduct.deleted' => 0]);
+        }
+
+        return $c;
     }
 
     /**

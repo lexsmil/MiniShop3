@@ -762,6 +762,8 @@ class GridConfigService
     /**
      * Extract option fields from grid config for JOIN building
      *
+     * Re-validates option.key on read (defense in depth) — config can be modified directly in DB.
+     *
      * @param array $gridFields Array of grid field configs
      * @return array List of option field definitions: [['fieldName' => 'option_length', 'key' => 'length', 'alias' => 'opt_length'], ...]
      */
@@ -780,6 +782,10 @@ class GridConfigService
             }
 
             $key = $option['key'];
+            if (!preg_match('/^[a-z0-9_]+$/i', $key)) {
+                continue;
+            }
+
             $fieldName = $field['name'];
             $alias = 'opt_' . $key;
 
