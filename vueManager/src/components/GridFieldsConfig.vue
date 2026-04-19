@@ -14,7 +14,9 @@ import { useToast } from 'primevue/usetoast'
 import { computed, onMounted, ref } from 'vue'
 import draggable from 'vuedraggable'
 
+import { GridColumnEditorType, normalizeGridColumnEditorType } from '../constants/gridColumnEditorTypes.js'
 import request from '../request.js'
+import { isAllowlistedComboEndpoint } from '../utils/gridEditorOptions.js'
 import ActionsEditor from './ActionsEditor.vue'
 
 const toast = useToast()
@@ -54,7 +56,10 @@ const newField = ref({
       color_field: '',
     },
     editable: false,
-    editor_type: 'text',
+    editor_type: GridColumnEditorType.TEXT,
+    editor_options: [],
+    editor_reference: '',
+    editor_combo_endpoint: '',
   },
 })
 
@@ -135,10 +140,25 @@ function editorOptionsToJson(editorOptions) {
  * Editor type options for editable columns (text, number, select, combo)
  */
 const editorTypeOptions = computed(() => [
-  { label: _('editor_type_text'), value: 'text' },
-  { label: _('editor_type_number'), value: 'number' },
-  { label: _('editor_type_select'), value: 'select' },
-  { label: _('editor_type_combo'), value: 'combo' },
+  { label: _('editor_type_text'), value: GridColumnEditorType.TEXT },
+  { label: _('editor_type_number'), value: GridColumnEditorType.NUMBER },
+  { label: _('editor_type_select'), value: GridColumnEditorType.SELECT },
+  { label: _('editor_type_combo'), value: GridColumnEditorType.COMBO },
+])
+
+/** From GET grid-config when grid is category-products */
+const editorReferenceList = ref([])
+
+const editorReferenceSelectOptions = computed(() =>
+  editorReferenceList.value.map(r => ({
+    label: `${r.key} (${r.path})`,
+    value: r.key,
+  }))
+)
+
+const editorReferenceOptionsWithEmpty = computed(() => [
+  { label: _('editor_reference_none'), value: '' },
+  ...editorReferenceSelectOptions.value,
 ])
 
 /**
@@ -194,6 +214,9 @@ async function loadFields() {
     })
 
     if (response && response.columns) {
+      editorReferenceList.value = Array.isArray(response.editor_references)
+        ? response.editor_references
+        : []
       fields.value = response.columns.map((col, index) => ({
         name: col.name,
         label: col.label,
@@ -223,13 +246,15 @@ async function loadFields() {
         unit: col.unit || '',
         unit_position: col.unit_position || '',
         editable: col.editable === true,
-        editor_type: col.editor_type || '',
+        editor_type: normalizeGridColumnEditorType(col.editor_type),
         editor_options: Array.isArray(col.editor_options) ? col.editor_options : [],
+        editor_reference: col.editor_reference || '',
         editor_combo_endpoint: col.editor_combo_endpoint || '',
       }))
     } else {
       console.error('[GridFieldsConfig] Invalid response:', response)
       fields.value = []
+      editorReferenceList.value = []
     }
   } catch (error) {
     console.error('[GridFieldsConfig] Error loading fields:', error)
@@ -287,7 +312,9 @@ async function saveConfig() {
         data.editable = field.editable === true
         if (field.editor_type) data.editor_type = field.editor_type
         if (Array.isArray(field.editor_options)) data.editor_options = field.editor_options
-        if (field.editor_combo_endpoint) data.editor_combo_endpoint = field.editor_combo_endpoint
+        data.editor_reference = field.editor_reference != null ? String(field.editor_reference) : ''
+        data.editor_combo_endpoint =
+          field.editor_combo_endpoint != null ? String(field.editor_combo_endpoint) : ''
       }
 
       return data
@@ -429,8 +456,9 @@ function openAddDialog() {
         color_field: '',
       },
       editable: false,
-      editor_type: 'text',
+      editor_type: GridColumnEditorType.TEXT,
       editor_options: [],
+      editor_reference: '',
       editor_combo_endpoint: '',
     },
   }
@@ -522,8 +550,8 @@ async function addField() {
 
     if (selectedGrid.value === 'category-products') {
       data.config.editable = newField.value.config.editable === true
-      data.config.editor_type = newField.value.config.editor_type || 'text'
-      if (newField.value.config.editor_type === 'select') {
+      data.config.editor_type = normalizeGridColumnEditorType(newField.value.config.editor_type)
+      if (newField.value.config.editor_type === GridColumnEditorType.SELECT) {
         const opts = parseEditorOptions(newFieldEditorOptionsJson.value)
         if (opts === null) {
           toast.add({
@@ -535,18 +563,36 @@ async function addField() {
           return
         }
         data.config.editor_options = opts
-      } else if (newField.value.config.editor_type === 'combo') {
-        const endpoint = (newField.value.config.editor_combo_endpoint || '').trim()
-        if (!endpoint) {
+        data.config.editor_reference = ''
+        data.config.editor_combo_endpoint = ''
+      } else if (newField.value.config.editor_type === GridColumnEditorType.COMBO) {
+        const ref = String(newField.value.config.editor_reference || '').trim()
+        const endpoint = String(newField.value.config.editor_combo_endpoint || '').trim()
+        if (endpoint && !isAllowlistedComboEndpoint(endpoint)) {
           toast.add({
             severity: 'error',
             summary: _('error'),
-            detail: _('editor_combo_endpoint_required'),
+            detail: _('editor_combo_endpoint_not_allowlisted'),
             life: 5000,
           })
           return
         }
+        const refOk = ref !== '' && editorReferenceList.value.some(r => r.key === ref)
+        if (!refOk && !endpoint) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('editor_combo_ref_or_endpoint_required'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_reference = refOk ? ref : ''
         data.config.editor_combo_endpoint = endpoint
+      } else {
+        data.config.editor_options = []
+        data.config.editor_reference = ''
+        data.config.editor_combo_endpoint = ''
       }
     }
 
@@ -593,8 +639,9 @@ async function addField() {
         unit: config.unit || '',
         unit_position: config.unit_position || '',
         editable: config.editable === true,
-        editor_type: config.editor_type || '',
+        editor_type: normalizeGridColumnEditorType(config.editor_type),
         editor_options: Array.isArray(config.editor_options) ? config.editor_options : [],
+        editor_reference: config.editor_reference || '',
         editor_combo_endpoint: config.editor_combo_endpoint || '',
       })
     }
@@ -697,8 +744,9 @@ function openEditDialog(field, index) {
       displayConfig: displayConfig,
       badge: badgeConfig,
       editable: field.editable === true,
-      editor_type: field.editor_type || 'text',
+      editor_type: normalizeGridColumnEditorType(field.editor_type),
       editor_options: Array.isArray(field.editor_options) ? field.editor_options : [],
+      editor_reference: field.editor_reference || '',
       editor_combo_endpoint: field.editor_combo_endpoint || '',
     },
   }
@@ -790,8 +838,8 @@ async function saveEdit() {
 
     if (selectedGrid.value === 'category-products') {
       data.config.editable = editingField.value.config.editable === true
-      data.config.editor_type = editingField.value.config.editor_type || 'text'
-      if (editingField.value.config.editor_type === 'select') {
+      data.config.editor_type = normalizeGridColumnEditorType(editingField.value.config.editor_type)
+      if (editingField.value.config.editor_type === GridColumnEditorType.SELECT) {
         const opts = parseEditorOptions(editingFieldEditorOptionsJson.value)
         if (opts === null) {
           toast.add({
@@ -803,18 +851,36 @@ async function saveEdit() {
           return
         }
         data.config.editor_options = opts
-      } else if (editingField.value.config.editor_type === 'combo') {
-        const endpoint = (editingField.value.config.editor_combo_endpoint || '').trim()
-        if (!endpoint) {
+        data.config.editor_reference = ''
+        data.config.editor_combo_endpoint = ''
+      } else if (editingField.value.config.editor_type === GridColumnEditorType.COMBO) {
+        const ref = String(editingField.value.config.editor_reference || '').trim()
+        const endpoint = String(editingField.value.config.editor_combo_endpoint || '').trim()
+        if (endpoint && !isAllowlistedComboEndpoint(endpoint)) {
           toast.add({
             severity: 'error',
             summary: _('error'),
-            detail: _('editor_combo_endpoint_required'),
+            detail: _('editor_combo_endpoint_not_allowlisted'),
             life: 5000,
           })
           return
         }
+        const refOk = ref !== '' && editorReferenceList.value.some(r => r.key === ref)
+        if (!refOk && !endpoint) {
+          toast.add({
+            severity: 'error',
+            summary: _('error'),
+            detail: _('editor_combo_ref_or_endpoint_required'),
+            life: 5000,
+          })
+          return
+        }
+        data.config.editor_reference = refOk ? ref : ''
         data.config.editor_combo_endpoint = endpoint
+      } else {
+        data.config.editor_options = []
+        data.config.editor_reference = ''
+        data.config.editor_combo_endpoint = ''
       }
     }
 
@@ -864,8 +930,9 @@ async function saveEdit() {
         unit: config.unit || '',
         unit_position: config.unit_position || '',
         editable: config.editable === true,
-        editor_type: config.editor_type || '',
+        editor_type: normalizeGridColumnEditorType(config.editor_type),
         editor_options: Array.isArray(config.editor_options) ? config.editor_options : [],
+        editor_reference: config.editor_reference || '',
         editor_combo_endpoint: config.editor_combo_endpoint || '',
       }
     }
@@ -1208,7 +1275,7 @@ onMounted(() => {
             option-value="value"
             class="w-full mt-1"
           />
-          <div v-if="newField.config.editor_type === 'select'" class="mt-2">
+          <div v-if="newField.config.editor_type === GridColumnEditorType.SELECT" class="mt-2">
             <label for="new-field-editor-options">{{ _('editor_options') }}</label>
             <Textarea
               id="new-field-editor-options"
@@ -1218,14 +1285,28 @@ onMounted(() => {
               :placeholder="_('editor_options_hint')"
             />
           </div>
-          <div v-if="newField.config.editor_type === 'combo'" class="mt-2">
-            <label for="new-field-editor-combo-endpoint">{{ _('editor_combo_endpoint') }}</label>
+          <div v-if="newField.config.editor_type === GridColumnEditorType.COMBO" class="mt-2">
+            <label for="new-field-editor-reference">{{ _('editor_reference') }}</label>
+            <Select
+              id="new-field-editor-reference"
+              v-model="newField.config.editor_reference"
+              :options="editorReferenceOptionsWithEmpty"
+              option-label="label"
+              option-value="value"
+              class="w-full mt-1"
+              show-clear
+            />
+            <small class="text-muted block mt-1">{{ _('editor_reference_hint') }}</small>
+            <label for="new-field-editor-combo-endpoint" class="block mt-2">{{
+              _('editor_combo_endpoint_override')
+            }}</label>
             <InputText
               id="new-field-editor-combo-endpoint"
               v-model="newField.config.editor_combo_endpoint"
               class="w-full mt-1"
               :placeholder="_('editor_combo_endpoint_placeholder')"
             />
+            <small class="text-muted block mt-1">{{ _('editor_combo_endpoint_override_hint') }}</small>
           </div>
         </div>
       </div>
@@ -1494,7 +1575,7 @@ onMounted(() => {
               option-value="value"
               class="w-full mt-1"
             />
-            <div v-if="editingField.config.editor_type === 'select'" class="mt-2">
+            <div v-if="editingField.config.editor_type === GridColumnEditorType.SELECT" class="mt-2">
               <label for="edit-field-editor-options">{{ _('editor_options') }}</label>
               <Textarea
                 id="edit-field-editor-options"
@@ -1504,14 +1585,28 @@ onMounted(() => {
                 :placeholder="_('editor_options_hint')"
               />
             </div>
-            <div v-if="editingField.config.editor_type === 'combo'" class="mt-2">
-              <label for="edit-field-editor-combo-endpoint">{{ _('editor_combo_endpoint') }}</label>
+            <div v-if="editingField.config.editor_type === GridColumnEditorType.COMBO" class="mt-2">
+              <label for="edit-field-editor-reference">{{ _('editor_reference') }}</label>
+              <Select
+                id="edit-field-editor-reference"
+                v-model="editingField.config.editor_reference"
+                :options="editorReferenceOptionsWithEmpty"
+                option-label="label"
+                option-value="value"
+                class="w-full mt-1"
+                show-clear
+              />
+              <small class="text-muted block mt-1">{{ _('editor_reference_hint') }}</small>
+              <label for="edit-field-editor-combo-endpoint" class="block mt-2">{{
+                _('editor_combo_endpoint_override')
+              }}</label>
               <InputText
                 id="edit-field-editor-combo-endpoint"
                 v-model="editingField.config.editor_combo_endpoint"
                 class="w-full mt-1"
                 :placeholder="_('editor_combo_endpoint_placeholder')"
               />
+              <small class="text-muted block mt-1">{{ _('editor_combo_endpoint_override_hint') }}</small>
             </div>
           </div>
         </div>
