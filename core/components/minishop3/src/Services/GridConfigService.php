@@ -2,8 +2,10 @@
 
 namespace MiniShop3\Services;
 
-use MODX\Revolution\modX;
 use MiniShop3\Model\msGridField;
+use MiniShop3\Services\Grid\GridOptionColumnResolver;
+use MiniShop3\Services\Grid\OptionColumnSpec;
+use MODX\Revolution\modX;
 
 /**
  * Service for managing grid configurations
@@ -751,8 +753,8 @@ class GridConfigService
             return ['success' => false, 'message' => 'option.key is required for option field'];
         }
 
-        $key = $option['key'];
-        if (!preg_match('/^[a-z0-9_]+$/i', $key)) {
+        $key = (string) $option['key'];
+        if (!OptionColumnSpec::isValidOptionKey($key)) {
             return ['success' => false, 'message' => 'option.key must contain only letters, numbers and underscores'];
         }
 
@@ -769,34 +771,10 @@ class GridConfigService
      */
     public function extractOptionFields(array $gridFields): array
     {
-        $optionFields = [];
-
-        foreach ($gridFields as $field) {
-            if (($field['type'] ?? 'model') !== 'option') {
-                continue;
-            }
-
-            $option = $field['option'] ?? null;
-            if (!$option || empty($option['key'])) {
-                continue;
-            }
-
-            $key = $option['key'];
-            if (!preg_match('/^[a-z0-9_]+$/i', $key)) {
-                continue;
-            }
-
-            $fieldName = $field['name'];
-            $alias = 'opt_' . $key;
-
-            $optionFields[] = [
-                'fieldName' => $fieldName,
-                'key' => $key,
-                'alias' => $alias,
-            ];
-        }
-
-        return $optionFields;
+        return array_map(
+            static fn (OptionColumnSpec $spec) => $spec->toJoinDescriptor(),
+            GridOptionColumnResolver::resolve($gridFields)
+        );
     }
 
     /**
