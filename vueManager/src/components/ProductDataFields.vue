@@ -315,10 +315,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.product-data-fields {
-  padding: 1.25rem;
-}
-
 .fields-grid {
   display: flex;
   flex-wrap: wrap;
